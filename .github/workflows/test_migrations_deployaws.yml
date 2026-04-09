@@ -94,7 +94,7 @@ jobs:
           PLANETSCALE_SERVICE_TOKEN_ID: ${{ secrets.PSCALE_SERVICE_TOKEN_ID }}
           PLANETSCALE_SERVICE_TOKEN: ${{ secrets.PSCALE_SERVICE_TOKEN }}
         run: |
-          pscale org list
+          pscale backup list zephyr-stage main --org zephyr-cloud -f json
 
       - name: Prepare temporary branch name
         id: prep
