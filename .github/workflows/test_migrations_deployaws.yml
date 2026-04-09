@@ -10,7 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -56,7 +56,7 @@ jobs:
       has_migrations: ${{ steps.check.outputs.has_migrations }}
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Check migrations
         id: check
@@ -79,7 +79,7 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Setup Pscale CLI
         uses: planetscale/setup-pscale-action@v1
@@ -88,13 +88,6 @@ jobs:
 
       - name: Install jq
         run: sudo apt-get update && sudo apt-get install -y jq
-
-      - name: Verify PlanetScale access
-        env:
-          PLANETSCALE_SERVICE_TOKEN_ID: ${{ secrets.PSCALE_SERVICE_TOKEN_ID }}
-          PLANETSCALE_SERVICE_TOKEN: ${{ secrets.PSCALE_SERVICE_TOKEN }}
-        run: |
-          pscale branch list zephyr-stage --org zephyr-cloud
 
       - name: Prepare temporary branch name
         id: prep
@@ -168,7 +161,8 @@ jobs:
           DATABASE_URL: ${{ steps.db_creds.outputs.database_url }}
         run: |
           echo "Running migrations on temporary database..."
-          # пример:
+          sleep 120
+          # example
           # pnpm install --frozen-lockfile
           # pnpm prisma migrate deploy
 
@@ -188,7 +182,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
 
       - name: Run migrations on production database
         env:
@@ -212,7 +206,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
       - run: echo "Deploying to AWS ECS..."
 
       # - name: Configure AWS credentials
