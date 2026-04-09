@@ -1,0 +1,230 @@
+name: Deploy to test environment
+
+on:
+  push:
+    branches:
+      - feat/test-deploy
+
+jobs:
+  docker_build_push:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Prepare image tag
+        id: meta
+        run: |
+          IMAGE_TAG="v1.0.0"
+          #IMAGE_TAG="${GITHUB_REF_NAME}"
+          echo "image_tag=$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+          echo "Using image tag: $IMAGE_TAG"
+
+      # - name: Configure AWS credentials
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_ROLE_NAME }}
+      #     aws-region: eu-central-1
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: eu-central-1
+
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: ./Dockerfile
+          push: true
+          tags: ${{ steps.login-ecr.outputs.registry }}/zephyr-api:prod-${{ steps.meta.outputs.image_tag }}
+          cache-from: type=gha,scope=zephyr-api-prod
+          cache-to: type=gha,scope=zephyr-api-prod,mode=max
+
+  check_migrations:
+    runs-on: ubuntu-latest
+    outputs:
+      has_migrations: ${{ steps.check.outputs.has_migrations }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check migrations
+        id: check
+        run: |
+          echo "Checking for pending migrations..."
+          HAS_MIGRATIONS=true
+
+          echo "Result: $HAS_MIGRATIONS"
+
+          echo "has_migrations=$HAS_MIGRATIONS" >> "$GITHUB_OUTPUT"
+
+  create_tmp_db:
+    if: needs.check_migrations.outputs.has_migrations == 'true'
+    needs: check_migrations
+    runs-on: ubuntu-latest
+    env:
+      ORG: zephyr-cloud
+      PROD_BRANCH: main
+      DB: zephyr-stage
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Pscale CLI
+        uses: planetscale/setup-pscale-action@v1
+        with:
+          version: v0.275.0
+
+      - name: Install jq
+        run: sudo apt-get update && sudo apt-get install -y jq
+
+      - name: Verify PlanetScale access
+        env:
+          PLANETSCALE_SERVICE_TOKEN_ID: ${{ secrets.PSCALE_SERVICE_TOKEN_ID }}
+          PLANETSCALE_SERVICE_TOKEN: ${{ secrets.PSCALE_SERVICE_TOKEN }}
+        run: |
+          pscale org list
+
+      - name: Prepare temporary branch name
+        id: prep
+        run: |
+          BRANCH_NAME="test-migrations-v1.0.0"
+          #BRANCH_NAME="test-migrations-${GITHUB_REF_NAME}"
+          echo "branch_name=$BRANCH_NAME" >> "$GITHUB_OUTPUT"
+          echo "Using temp branch: $BRANCH_NAME"
+
+      - name: Get latest backup id
+        id: backup
+        env:
+          PLANETSCALE_SERVICE_TOKEN_ID: ${{ secrets.PSCALE_SERVICE_TOKEN_ID }}
+          PLANETSCALE_SERVICE_TOKEN: ${{ secrets.PSCALE_SERVICE_TOKEN }}
+        run: |
+          BACKUP_ID=$(pscale backup list "$DB" "$PROD_BRANCH" \
+            --org "$ORG" \
+            -f json | jq -r '.[0].id')
+
+          if [ -z "$BACKUP_ID" ] || [ "$BACKUP_ID" = "null" ]; then
+            echo "Failed to get backup id"
+            exit 1
+          fi
+
+          echo "backup_id=$BACKUP_ID" >> "$GITHUB_OUTPUT"
+          echo "Latest backup id: $BACKUP_ID"
+
+      - name: Create temporary database branch from backup
+        env:
+          PLANETSCALE_SERVICE_TOKEN_ID: ${{ secrets.PSCALE_SERVICE_TOKEN_ID }}
+          PLANETSCALE_SERVICE_TOKEN: ${{ secrets.PSCALE_SERVICE_TOKEN }}
+        run: |
+          pscale branch create "$DB" "${{ steps.prep.outputs.branch_name }}" \
+            --org "$ORG" \
+            --restore "${{ steps.backup.outputs.backup_id }}" \
+            --wait
+
+      - name: Create role and build DATABASE_URL
+        id: db_creds
+        env:
+          PLANETSCALE_SERVICE_TOKEN_ID: ${{ secrets.PSCALE_SERVICE_TOKEN_ID }}
+          PLANETSCALE_SERVICE_TOKEN: ${{ secrets.PSCALE_SERVICE_TOKEN }}
+        run: |
+          RESPONSE=$(pscale role create "$DB" "${{ steps.prep.outputs.branch_name }}" app_role \
+            --org "$ORG" \
+            --inherited-roles pg_read_all_data,pg_write_all_data \
+            -f json)
+
+          echo "$RESPONSE" > role.json
+
+          HOST=$(jq -r '.access_host_url // .host // empty' role.json)
+          USERNAME=$(jq -r '.username // empty' role.json)
+          PASSWORD=$(jq -r '.plain_text // .password // empty' role.json)
+
+          if [ -z "$HOST" ] || [ -z "$USERNAME" ] || [ -z "$PASSWORD" ]; then
+            echo "Failed to parse DB credentials"
+            cat role.json
+            exit 1
+          fi
+
+          DATABASE_URL="postgresql://${USERNAME}:${PASSWORD}@${HOST}/postgres?sslmode=require"
+
+          echo "::add-mask::$PASSWORD"
+          echo "::add-mask::$DATABASE_URL"
+
+          echo "DATABASE_URL=$DATABASE_URL" >> "$GITHUB_ENV"
+          echo "database_url=$DATABASE_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Run migrations
+        env:
+          DATABASE_URL: ${{ steps.db_creds.outputs.database_url }}
+        run: |
+          echo "Running migrations on temporary database..."
+          # пример:
+          # pnpm install --frozen-lockfile
+          # pnpm prisma migrate deploy
+
+      - name: Destroy temporary database
+        if: always()
+        continue-on-error: true
+        env:
+          PLANETSCALE_SERVICE_TOKEN_ID: ${{ secrets.PSCALE_SERVICE_TOKEN_ID }}
+          PLANETSCALE_SERVICE_TOKEN: ${{ secrets.PSCALE_SERVICE_TOKEN }}
+        run: |
+          pscale branch delete "$DB" "${{ steps.prep.outputs.branch_name }}" \
+            --org "$ORG" \
+            --force
+
+  run_migrations_to_prod_db:
+    needs: create_tmp_db
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Run migrations on production database
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: |
+          echo "Running migrations on production database..."
+          # example
+          # pnpm install --frozen-lockfile
+          # pnpm prisma migrate deploy
+
+  deploy_to_ecs:
+    needs: [docker_build_push, check_migrations, run_migrations_to_prod_db]
+    if: >
+      always() &&
+      needs.docker_build_push.result == 'success' &&
+      needs.check_migrations.result == 'success' &&
+      (
+      needs.check_migrations.outputs.has_migrations == 'false' ||
+      needs.run_migrations_to_prod_db.result == 'success'
+      )
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      - run: echo "Deploying to AWS ECS..."
+
+      # - name: Configure AWS credentials
+      #   uses: aws-actions/configure-aws-credentials@v4
+      #   with:
+      #     role-to-assume: arn:aws:iam::${{ secrets.AWS_ACCOUNT_ID }}:role/${{ secrets.AWS_ROLE_NAME }}
+      #     aws-region: eu-central-1
+
+      # - name: Deploy to ECS
+      #   uses: aws-actions/amazon-ecs-deploy-task-definition@v1
+      #   with:
+      #     task-definition: ecs-task-def.json
+      #     service: zephyr-api-service
+      #     cluster: zephyr-cluster
+      #     wait-for-service-stability: true
