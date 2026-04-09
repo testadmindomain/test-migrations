@@ -99,7 +99,7 @@ jobs:
       - name: Prepare temporary branch name
         id: prep
         run: |
-          BRANCH_NAME="test-migrations-v1.0.0"
+          BRANCH_NAME="test-${GITHUB_SHA::7}"
           #BRANCH_NAME="test-migrations-${GITHUB_REF_NAME}"
           echo "branch_name=$BRANCH_NAME" >> "$GITHUB_OUTPUT"
           echo "Using temp branch: $BRANCH_NAME"
