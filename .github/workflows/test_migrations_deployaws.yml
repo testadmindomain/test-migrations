@@ -58,7 +58,7 @@ jobs:
         id: check
         run: |
           echo "Checking for pending migrations..."
-          HAS_MIGRATIONS=false
+          HAS_MIGRATIONS=true
 
           echo "Result: $HAS_MIGRATIONS"
 
